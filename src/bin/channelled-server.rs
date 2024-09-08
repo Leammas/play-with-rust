@@ -24,32 +24,36 @@ async fn run_server() -> () {
         let mut db: HashMap<String, Bytes> = HashMap::new();
 
         while let Some(message) = rx.recv().await {
-            let r = match message.cmd {
-                mini_redis::Command::Set(cmd) => {
-                    db.insert(cmd.key().to_string(), cmd.value().clone());
-                    Frame::Simple("OK".to_string())
-                }
-                mini_redis::Command::Get(cmd) => {
-                    if let Some(value) = db.get(cmd.key()) {
-                        Frame::Bulk(value.clone())
-                    } else {
-                        Frame::Null
-                    }
-                }
-                cmd => panic!("unimplemented {:?}", cmd),
-            };
-            message.resp.send(r);
+            handle_command(message, &mut db);
         }
     });
 
     loop {
         // The second item contains the IP and port of the new connection.
         let (socket, _) = listener.accept().await.unwrap();
-        tokio::spawn(process(socket, tx.clone()));
+        tokio::spawn(handle_connection(socket, tx.clone()));
     }
 }
 
-async fn process(socket: TcpStream, sender: mpsc::Sender<CommandAndResponder>) {
+fn handle_command(message: CommandAndResponder, db: &mut HashMap<String, Bytes>) {
+    let r = match message.cmd {
+        mini_redis::Command::Set(cmd) => {
+            db.insert(cmd.key().to_string(), cmd.value().clone());
+            Frame::Simple("OK".to_string())
+        }
+        mini_redis::Command::Get(cmd) => {
+            if let Some(value) = db.get(cmd.key()) {
+                Frame::Bulk(value.clone())
+            } else {
+                Frame::Null
+            }
+        }
+        cmd => panic!("unimplemented {:?}", cmd),
+    };
+    message.resp.send(r);
+}
+
+async fn handle_connection(socket: TcpStream, sender: mpsc::Sender<CommandAndResponder>) {
     // Connection, provided by `mini-redis`, handles parsing frames from
     // the socket
     let mut connection = Connection::new(socket);
