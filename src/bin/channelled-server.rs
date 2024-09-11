@@ -1,10 +1,10 @@
 use bytes::Bytes;
 use mini_redis::{Command, Connection, Frame};
-use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 type Responder<T> = oneshot::Sender<T>;
+use tokio_postgres::NoTls;
 
 // example rewritte to channel based synchronization
 
@@ -14,17 +14,39 @@ fn main() {
 }
 
 async fn run_server() -> () {
+    // Connect to the database.
+    let (client, connection) = tokio_postgres::connect("host=localhost user=postgres password=mysecretpassword port=5432", NoTls)
+        .await
+        .unwrap();
+
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    client
+        .batch_execute(
+            "
+CREATE TABLE kv (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+",
+        )
+        .await
+        .ok();
+
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
 
     let (tx, mut rx) = mpsc::channel::<CommandAndResponder>(32);
 
-    let manager = tokio::spawn(async move {
-        // A hashmap is used to store data
-        let mut db: HashMap<String, Bytes> = HashMap::new();
-
+    tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            handle_command(message, &mut db);
+            handle_command(message, &client).await;
         }
     });
 
@@ -35,22 +57,44 @@ async fn run_server() -> () {
     }
 }
 
-fn handle_command(message: CommandAndResponder, db: &mut HashMap<String, Bytes>) {
+async fn handle_command(message: CommandAndResponder, client: &tokio_postgres::Client) {
     let r = match message.cmd {
         mini_redis::Command::Set(cmd) => {
-            db.insert(cmd.key().to_string(), cmd.value().clone());
+            let value = String::from_utf8(cmd.value().clone().to_vec()).unwrap();
+
+            client
+                .query(
+                    "INSERT INTO kv (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2;",
+                    &[&cmd.key().to_string(), &value],
+                )
+                .await
+                .unwrap();
+
             Frame::Simple("OK".to_string())
         }
         mini_redis::Command::Get(cmd) => {
-            if let Some(value) = db.get(cmd.key()) {
-                Frame::Bulk(value.clone())
+            let key = cmd.key();
+
+            let rows = client
+                .query("SELECT value FROM kv WHERE key = $1", &[&key.to_string()])
+                .await
+                .unwrap();
+
+                println!("r {:?}", &rows);
+
+            if let Some(row) = rows.get(0) {
+                let value: String = row.get(0);
+
+                println!("v {}", &value);
+
+                Frame::Bulk(Bytes::from(value))
             } else {
                 Frame::Null
             }
         }
         cmd => panic!("unimplemented {:?}", cmd),
     };
-    message.resp.send(r);
+    let _ = message.resp.send(r);
 }
 
 async fn handle_connection(socket: TcpStream, sender: mpsc::Sender<CommandAndResponder>) {
@@ -61,9 +105,11 @@ async fn handle_connection(socket: TcpStream, sender: mpsc::Sender<CommandAndRes
     while let Some(frame) = connection.read_frame().await.unwrap() {
         let cmd = Command::from_frame(frame).unwrap();
         let (resp, resp_rx) = oneshot::channel();
-        sender.send(CommandAndResponder{cmd, resp}).await;
+        let _ = sender.send(CommandAndResponder { cmd, resp }).await;
 
         let response = resp_rx.await;
+
+        println!("r {:?}", &response);
 
         // Write the response to the client
         connection.write_frame(&response.unwrap()).await.unwrap();

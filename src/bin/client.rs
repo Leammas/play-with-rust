@@ -10,11 +10,12 @@ use Command::{Get, Set};
 async fn main() {
     let (tx, mut rx) = mpsc::channel::<Command>(32);
     let tx2 = tx.clone();
+    let tx3 = tx.clone();
 
     // Establish a connection to the server
     let mut client = client::connect("127.0.0.1:6379").await.unwrap();
 
-    // Spawn two tasks, one gets a key, the other sets a key
+    // Spawn three tasks, one gets a key, the other sets a key, and the last overwrites the key
     let t1 = tokio::spawn(async move {
         let (resp_tx, resp_rx) = oneshot::channel();
         tx.send(Command::Get {
@@ -42,16 +43,31 @@ async fn main() {
         println!("GOT = {:?}", res);
     });
 
+
+    let t3 = tokio::spawn(async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        tx3.send(Command::Set {
+            key: String::from("foo"),
+            val: "baz".into(),
+            resp: resp_tx,
+        })
+        .await
+        .unwrap();
+
+        let res = resp_rx.await;
+        println!("GOT = {:?}", res);
+    });
+
     let manager = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             match message {
                 Get { key, resp } => {
                     let r = client.get(&key).await;
-                    resp.send(r);
+                    let _ = resp.send(r);
                 }
                 Set { key, val, resp } => {
                     let r = client.set(&key, val).await;
-                    resp.send(r);
+                    let _ = resp.send(r);
                 }
             }
         }
@@ -59,6 +75,7 @@ async fn main() {
 
     t1.await.unwrap();
     t2.await.unwrap();
+    t3.await.unwrap();
     manager.await.unwrap();
 }
 
