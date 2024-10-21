@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use tokio_postgres::{NoTls};
+
 mod controller;
 mod service;
+mod repository;
 
 // http based KV 
 fn main() {
@@ -10,40 +11,14 @@ fn main() {
 }
 
 async fn run_server() -> () {
-    // Connect to the database.
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost user=postgres password=mysecretpassword port=5432",
-        NoTls,
-    )
-    .await
-    .unwrap();
-
-    // The connection object performs the actual communication with the database,
-    // so spawn it off to run on its own.
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
-    });
-
-    client
-        .batch_execute(
-            "
-CREATE TABLE kv (
-    key TEXT PRIMARY KEY,
-    value TEXT
-);
-",
-        )
-        .await
-        .ok();
-
     // initialize tracing
     tracing_subscriber::fmt::init();
 
+    let repository = repository::Repository::new().await;
+
     // since the service has stateful client under the hood which we're fine to share
     // using Atomic reference counter wrapper
-    let service = Arc::new(service::KeyValueService::new(client));
+    let service = Arc::new(service::KeyValueService::new(repository));
 
     //@todo add layers
     let app = controller::Controller::new(service).router();

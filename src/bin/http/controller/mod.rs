@@ -1,7 +1,11 @@
+use crate::service::ServiceError;
+
 use super::service::KeyValueService;
 use axum::extract::Path;
+use axum::response::IntoResponse;
 use axum::{
     http::StatusCode,
+    response::Response,
     routing::{get, put},
     Router,
 };
@@ -27,13 +31,10 @@ impl Controller {
                         async move {
                             match service.get_key(id).await {
                                 Ok(v) => match v {
-                                    Some(v) => (StatusCode::OK, v),
-                                    None => (StatusCode::NOT_FOUND, "Not Found".to_string()),
+                                    Some(value) => (StatusCode::OK, value).into_response(),
+                                    None => (StatusCode::NOT_FOUND, "Not Found".to_string()).into_response(),
                                 },
-                                Err(_) => (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "Internal error".to_string(),
-                                ),
+                                Err(err) => err.into_response(), 
                             }
                         }
                     }
@@ -46,16 +47,26 @@ impl Controller {
                     move |Path(id): Path<String>, payload: String| {
                         let service = Arc::clone(&service);
                         async move {
-                            match service.set_key(id, payload).await {
-                                Ok(_) => (StatusCode::OK, "Ok".to_string()),
-                                Err(_) => (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "Internal error".to_string(),
-                                ),
-                            }
+                            service.set_key(id, payload).await.map_or_else(
+                                |err| err.into_response(),
+                                |_| (StatusCode::OK, "Ok".to_string()).into_response(),
+                            )
                         }
                     }
                 }),
             )
+    }
+}
+
+impl IntoResponse for ServiceError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            // Match on different ServiceErrors if you have specific handling
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            ),
+        };
+        (status, body).into_response()
     }
 }
